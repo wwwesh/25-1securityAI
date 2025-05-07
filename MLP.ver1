@@ -1,0 +1,116 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from imblearn.over_sampling import SMOTE
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.metrics import f1_score, roc_auc_score
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# 1) 데이터 로드 (드라이브 마운트 없이)
+df = pd.read_csv("/content/drive/MyDrive/Complete.csv")
+
+
+# 2) 중복/불필요 컬럼 제거
+df.drop_duplicates(subset='Address', keep='first', inplace=True)
+
+
+# 3) X, y 분리 및 수치형만 선택
+X = df.drop(columns=['FLAG']).select_dtypes(include='number')
+y = df['FLAG']
+
+# 4) 학습/테스트 분할
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# 5) 결측 대체, 스케일링, SMOTE
+imputer = SimpleImputer(strategy='median')
+X_train = imputer.fit_transform(X_train)
+X_test  = imputer.transform(X_test)
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test  = scaler.transform(X_test)
+
+smote = SMOTE(random_state=42)
+X_res, y_res = smote.fit_resample(X_train, y_train)
+
+# 6) DataLoader 생성
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+train_ds = TensorDataset(
+    torch.tensor(X_res, dtype=torch.float32),
+    torch.tensor(y_res.values, dtype=torch.float32)
+)
+test_ds = TensorDataset(
+    torch.tensor(X_test, dtype=torch.float32),
+    torch.tensor(y_test.values, dtype=torch.float32)
+)
+train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+test_loader  = DataLoader(test_ds, batch_size=64)
+
+# 7) MLP 모델
+class MLP(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, 1)
+        )
+    def forward(self, x):
+        return self.net(x).squeeze(1)
+
+model = MLP(input_dim=X_res.shape[1]).to(device)
+
+# 8) 손실/옵티마이저
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(model.parameters(), lr=1e-3)
+
+# 9) 학습 및 평가
+def train_epoch():
+    model.train()
+    loss_sum = 0
+    for xb, yb in train_loader:
+        xb, yb = xb.to(device), yb.to(device)
+        optimizer.zero_grad()
+        logits = model(xb)
+        loss = criterion(logits, yb)
+        loss.backward()
+        optimizer.step()
+        loss_sum += loss.item() * xb.size(0)
+    return loss_sum / len(train_loader.dataset)
+
+def evaluate():
+    model.eval()
+    preds, probs, labels = [], [], []
+    with torch.no_grad():
+        for xb, yb in test_loader:
+            xb = xb.to(device)
+            logits = model(xb)
+            p = torch.sigmoid(logits).cpu().numpy()
+            preds.extend((p > 0.5).astype(int).tolist())
+            probs.extend(p.tolist())
+            labels.extend(yb.numpy().tolist())
+    return f1_score(labels, preds), roc_auc_score(labels, probs)
+
+best_f1 = 0
+for epoch in range(1, 31):
+    loss = train_epoch()
+    f1, auc = evaluate()
+    print(f'Epoch {epoch:02d} | Loss: {loss:.4f} | F1: {f1:.4f} | AUC: {auc:.4f}')
+    if f1 > best_f1:
+        best_f1 = f1
+        torch.save(model.state_dict(), 'best_mlp.pth')
+
+print(f'▶ Best F1: {best_f1:.4f}')
