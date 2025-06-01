@@ -1,4 +1,4 @@
-# MLP 기반의 이더리움 사기 계정 탐지 AI
+# MLP 기반의 이더리움 사기 계정 탐지 AI 1차 프로젝트
 
 **blockchain.ipynb**
 
